@@ -1,0 +1,6 @@
+*.exe
+*.exe.config
+*.pdb
+debug.log
+*.user
+*.suo
