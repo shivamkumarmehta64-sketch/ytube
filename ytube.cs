@@ -1,8 +1,10 @@
 using System;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Runtime;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
@@ -11,9 +13,36 @@ namespace Ytube
 {
     static class Program
     {
+        private static Mutex mutex = null;
+
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
         [STAThread]
         static void Main()
         {
+            const string appName = "Ytube_SingleInstance_Mutex_9b2d0d52";
+            bool createdNew;
+
+            mutex = new Mutex(true, appName, out createdNew);
+
+            if (!createdNew)
+            {
+                Process current = Process.GetCurrentProcess();
+                foreach (Process process in Process.GetProcessesByName(current.ProcessName))
+                {
+                    if (process.Id != current.Id && process.MainWindowHandle != IntPtr.Zero)
+                    {
+                        ShowWindow(process.MainWindowHandle, 9); // SW_RESTORE = 9
+                        SetForegroundWindow(process.MainWindowHandle);
+                        break;
+                    }
+                }
+                return;
+            }
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new MainForm());
@@ -34,6 +63,8 @@ namespace Ytube
         private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
         [DllImport("user32.dll")]
         private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+        [DllImport("kernel32.dll")]
+        private static extern bool SetProcessWorkingSetSize(IntPtr proc, IntPtr min, IntPtr max);
 
         private const int WM_HOTKEY = 0x0312;
         private const uint VK_MEDIA_PLAY_PAUSE = 0xB3;
@@ -44,7 +75,7 @@ namespace Ytube
         {
             logPath = Path.Combine(
                 Path.GetDirectoryName(Application.ExecutablePath), "debug.log");
-            Log("=== ytube starting ===");
+            Log("=== ytube v1.1 starting ===");
 
             this.Text = "YouTube Desktop";
             this.Width = 1280;
@@ -56,7 +87,6 @@ namespace Ytube
             if (File.Exists(iconPath))
                 this.Icon = new Icon(iconPath);
 
-            // Loading label
             statusLabel = new Label();
             statusLabel.Text = "Loading YouTube...";
             statusLabel.ForeColor = Color.FromArgb(220, 220, 220);
@@ -78,6 +108,18 @@ namespace Ytube
             catch { }
         }
 
+        private void TrimWorkingSetRAM()
+        {
+            try
+            {
+                GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(2, GCCollectionMode.Optimized, false);
+                GC.WaitForPendingFinalizers();
+                SetProcessWorkingSetSize(Process.GetCurrentProcess().Handle, (IntPtr)(-1), (IntPtr)(-1));
+            }
+            catch { }
+        }
+
         // ─── Timers: GC every 60s ────────────────────────────────────────────────
 
         private void SetupTimers()
@@ -87,12 +129,7 @@ namespace Ytube
 
             gcTimer = new System.Windows.Forms.Timer();
             gcTimer.Interval = 60000;
-            gcTimer.Tick += (s, e) =>
-            {
-                GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
-                GC.Collect(2, GCCollectionMode.Optimized, false);
-                GC.WaitForPendingFinalizers();
-            };
+            gcTimer.Tick += (s, e) => TrimWorkingSetRAM();
             gcTimer.Start();
         }
 
@@ -115,7 +152,6 @@ namespace Ytube
                 Log("UserDataFolder: " + userDataFolder);
                 statusLabel.Text = "Initializing browser engine...";
 
-                // Memory limits via Chromium launch args
                 var options = new CoreWebView2EnvironmentOptions(
                     "--disk-cache-size=33554432 " +       // 32 MB disk cache
                     "--media-cache-size=33554432 " +      // 32 MB media cache
@@ -135,20 +171,18 @@ namespace Ytube
                 await webView.EnsureCoreWebView2Async(env);
                 Log("WebView2 ready");
 
-                // Auto-allow notifications
                 webView.CoreWebView2.PermissionRequested += (s, e) =>
                 {
                     if (e.PermissionKind == CoreWebView2PermissionKind.Notifications)
                         e.State = CoreWebView2PermissionState.Allow;
                 };
 
-                // Suspend WebView2 (release RAM) when minimized
                 this.Resize += (s, e) =>
                 {
                     if (this.WindowState == FormWindowState.Minimized)
                     {
                         webView.CoreWebView2.TrySuspendAsync();
-                        GC.Collect(2, GCCollectionMode.Optimized, false);
+                        TrimWorkingSetRAM();
                     }
                     else
                     {
@@ -156,11 +190,9 @@ namespace Ytube
                     }
                 };
 
-                // Inject ad-block JS before page loads
                 await webView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(GetAdBlockerJS());
                 Log("JS injected");
 
-                // Network-level ad domain blocking
                 SetupNetworkBlocking();
                 Log("Network blocking set");
 
@@ -217,7 +249,7 @@ namespace Ytube
             };
         }
 
-        // ─── Layer 2 + 3 + SponsorBlock + PiP ─────────────────────────────────────
+        // ─── Layer 2 + 3 + Anti-Adblock Bypass + SponsorBlock + PiP ─────────────
 
         private string GetAdBlockerJS()
         {
@@ -270,7 +302,8 @@ namespace Ytube
         'ytd-display-ad-renderer,.ytp-ad-module,.ytp-ad-player-overlay,',
         '.ytp-ad-image-overlay,.ytp-ad-text-overlay,.ytp-ce-element,',
         '.ytp-suggested-action,#masthead-ad,#player-ads,',
-        'ytd-promoted-sparkles-web-renderer,ytd-companion-ad-renderer',
+        'ytd-promoted-sparkles-web-renderer,ytd-companion-ad-renderer,',
+        'ytd-enforcement-message-view-model,tp-yt-paper-dialog:has(ytd-enforcement-message-view-model)',
         '{display:none!important}'
     ].join('');
     document.head.appendChild(style);
@@ -292,6 +325,13 @@ namespace Ytube
                     video.muted = false;
                 }
             }
+            // Dismiss anti-adblock modals
+            var popup = document.querySelector('ytd-enforcement-message-view-model');
+            if (popup) {
+                var btn = popup.querySelector('button') || document.querySelector('.yt-spec-button-shape-next');
+                if (btn) btn.click();
+                popup.remove();
+            }
         } catch(e) {}
         setTimeout(checkAds, 500);
     }
@@ -301,13 +341,12 @@ namespace Ytube
         new MutationObserver(function() {
             try {
                 var els = document.querySelectorAll(
-                    'ytd-ad-slot-renderer,.ytp-ad-module,ytd-promoted-sparkles-web-renderer');
+                    'ytd-ad-slot-renderer,.ytp-ad-module,ytd-promoted-sparkles-web-renderer,ytd-enforcement-message-view-model');
                 for (var i = 0; i < els.length; i++) els[i].style.display = 'none';
             } catch(e) {}
         }).observe(document.documentElement, {childList:true, subtree:true});
     } catch(e) {}
 
-    // SponsorBlock integration
     var sponsorCache = {};
     function skipSponsors(videoId) {
         if (!videoId || sponsorCache[videoId]) return;
@@ -351,7 +390,6 @@ namespace Ytube
     window.addEventListener('popstate', function() { setTimeout(detectVideoId, 1500); });
     setTimeout(detectVideoId, 3000);
 
-    // Picture-in-Picture helper
     window._ytube_togglePiP = function() {
         try {
             var video = document.querySelector('video');
@@ -381,7 +419,8 @@ true;
                 trayIcon.Icon = new Icon(iconPath);
 
             var menu = new ContextMenuStrip();
-            menu.Items.Add("Show YouTube", null, (s, e) => ShowMainWindow());
+            menu.Items.Add("Show YouTube Desktop", null, (s, e) => ShowMainWindow());
+            menu.Items.Add("Open YouTube Music", null, (s, e) => LaunchMtube());
             menu.Items.Add(new ToolStripSeparator());
 
             var pipItem = new ToolStripMenuItem("Toggle Picture-in-Picture (PiP)");
@@ -412,6 +451,26 @@ true;
                 if (e.Button == MouseButtons.Left)
                     ShowMainWindow();
             };
+        }
+
+        private void LaunchMtube()
+        {
+            try
+            {
+                string mtubePath = Path.Combine(
+                    Path.GetDirectoryName(Application.StartupPath), "mtube", "mtube.exe");
+                if (File.Exists(mtubePath))
+                {
+                    Process.Start(mtubePath);
+                }
+                else
+                {
+                    string desktopLnk = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "YouTube Music.lnk");
+                    if (File.Exists(desktopLnk)) Process.Start(desktopLnk);
+                }
+            }
+            catch { }
         }
 
         private void OnSleepTimerTick(object sender, EventArgs e)
@@ -488,7 +547,7 @@ true;
                 if (webViewReady)
                 {
                     webView.CoreWebView2.TrySuspendAsync();
-                    GC.Collect(2, GCCollectionMode.Optimized, false);
+                    TrimWorkingSetRAM();
                 }
             }
             else
