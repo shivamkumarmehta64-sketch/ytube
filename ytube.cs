@@ -63,6 +63,9 @@ namespace Ytube
         private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
         [DllImport("user32.dll")]
         private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+        [DllImport("shell32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern int SetCurrentProcessExplicitAppUserModelID(string AppID);
+
         [DllImport("kernel32.dll")]
         private static extern bool SetProcessWorkingSetSize(IntPtr proc, IntPtr min, IntPtr max);
 
@@ -73,11 +76,13 @@ namespace Ytube
 
         public MainForm()
         {
+            try { SetCurrentProcessExplicitAppUserModelID("com.shivam.ytube"); } catch { }
+
             logPath = Path.Combine(
                 Path.GetDirectoryName(Application.ExecutablePath), "debug.log");
             Log("=== ytube v1.1 starting ===");
 
-            this.Text = "YouTube Desktop";
+            this.Text = "ytube";
             this.Width = 1280;
             this.Height = 800;
             this.BackColor = Color.Black;
@@ -161,6 +166,10 @@ namespace Ytube
                     "--no-first-run " +                   // skip first-run setup
                     "--disable-sync " +                   // no Chrome account sync
                     "--disable-translate " +              // no translate UI
+                    "--enable-gpu-rasterization " +       // GPU rasterization
+                    "--ignore-gpu-blocklist " +           // GPU blocklist bypass
+                    "--enable-zero-copy " +               // zero-copy VRAM decoding
+                    "--enable-features=PlatformHEVCDecoderSupport,HardwareMediaKeyHandling " +
                     "--js-flags=--max-old-space-size=128" // JS heap limit: 128 MB
                 );
 
