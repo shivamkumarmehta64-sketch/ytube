@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
@@ -12,20 +13,32 @@ namespace BlackTube
 {
     public class MainForm : Form
     {
-        // ── P/Invoke ──
+        // ── DWM Immersive Dark Mode ──
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+        private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+        private const int DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19;
+
+        private static void EnableDarkMode(IntPtr handle)
+        {
+            try
+            {
+                int darkMode = 1;
+                if (DwmSetWindowAttribute(handle, DWMWA_USE_IMMERSIVE_DARK_MODE, ref darkMode, sizeof(int)) != 0)
+                {
+                    DwmSetWindowAttribute(handle, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, ref darkMode, sizeof(int));
+                }
+            }
+            catch { }
+        }
+
+        // ── Global Hotkeys ──
         [DllImport("user32.dll")]
         private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
         [DllImport("user32.dll")]
         private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
-        [DllImport("user32.dll")]
-        private static extern bool ReleaseCapture();
-        [DllImport("user32.dll")]
-        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wp, IntPtr lp);
 
-        private const int WM_NCLBUTTONDOWN = 0xA1;
-        private const int HT_CAPTION = 0x2;
         private const int WM_HOTKEY = 0x0312;
-
         private const uint VK_MEDIA_NEXT_TRACK = 0xB0;
         private const uint VK_MEDIA_PREV_TRACK = 0xB1;
         private const uint VK_MEDIA_PLAY_PAUSE = 0xB3;
@@ -34,18 +47,16 @@ namespace BlackTube
         private const int HOTKEY_NEXT = 9002;
         private const int HOTKEY_PREV = 9003;
 
-        // ── Controls & State ──
-        private Panel _topBar;
-        private Panel _tabContainer;
+        // ── UI Components ──
+        private Panel _navBar;
+        private Panel _tabPanel;
         private Button _btnYouTube;
         private Button _btnMusic;
         private Button _btnSleep;
         private Button _btnPip;
         private Button _btnPin;
-        private Button _btnMin;
-        private Button _btnMax;
-        private Button _btnClose;
-        private Label _lblTitle;
+        private Button _btnReload;
+        private Panel _contentPanel;
 
         private WebView2 _ytWebView;
         private WebView2 _musicWebView;
@@ -53,28 +64,32 @@ namespace BlackTube
         private bool _isPipMode = false;
         private bool _isAlwaysOnTop = false;
 
-        private Rectangle _prePipBounds;
-        private FormWindowState _prePipState;
+        private Rectangle _normalBounds;
+        private FormWindowState _normalState;
 
         private NotifyIcon _trayIcon;
         private ContextMenuStrip _trayMenu;
+        private bool _isExiting = false;
 
         private Timer _sleepTimer;
         private int _sleepRemainingSeconds = 0;
         private Timer _gcTimer;
+        private string _logPath;
 
         public MainForm()
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
-            
+
+            _logPath = Path.Combine(Application.StartupPath, "debug.log");
+            Log("MainForm constructor starting");
+
             this.Text = "BlackTube - YouTube & YT Music";
             this.Width = 1280;
-            this.Height = 800;
-            this.MinimumSize = new Size(400, 240);
+            this.Height = 820;
+            this.MinimumSize = new Size(420, 260);
             this.StartPosition = FormStartPosition.CenterScreen;
-            this.BackColor = Color.FromArgb(8, 8, 14);
+            this.BackColor = Color.FromArgb(12, 12, 18);
             this.ForeColor = Color.White;
-            this.FormBorderStyle = FormBorderStyle.None;
 
             string iconPath = Path.Combine(Application.StartupPath, "icon.ico");
             if (File.Exists(iconPath))
@@ -87,8 +102,11 @@ namespace BlackTube
             SetupTimers();
             SetupHotkeys();
 
+            this.HandleCreated += (s, e) => EnableDarkMode(this.Handle);
+
             this.Load += async (s, e) =>
             {
+                EnableDarkMode(this.Handle);
                 await InitializeWebViewsAsync();
             };
 
@@ -99,152 +117,153 @@ namespace BlackTube
                     MemoryTrimmer.Trim();
                 }
             };
+
+            this.FormClosing += (s, e) =>
+            {
+                if (!_isExiting && e.CloseReason == CloseReason.UserClosing)
+                {
+                    e.Cancel = true;
+                    this.Hide();
+                    if (_trayIcon != null)
+                    {
+                        _trayIcon.ShowBalloonTip(1200, "BlackTube", "Minimized to tray. Right-click icon to quit.", ToolTipIcon.Info);
+                    }
+                }
+                else
+                {
+                    try
+                    {
+                        UnregisterHotKey(this.Handle, HOTKEY_PLAY_PAUSE);
+                        UnregisterHotKey(this.Handle, HOTKEY_NEXT);
+                        UnregisterHotKey(this.Handle, HOTKEY_PREV);
+                    }
+                    catch { }
+                }
+            };
         }
 
-        // ── Custom Titlebar & UI ──
+        private void Log(string msg)
+        {
+            try
+            {
+                File.AppendAllText(_logPath, "[" + DateTime.Now.ToString("HH:mm:ss") + "] " + msg + Environment.NewLine);
+            }
+            catch { }
+        }
+
         private void SetupUI()
         {
-            _topBar = new Panel
+            // 1. Navigation Top Bar
+            _navBar = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 44,
-                BackColor = Color.FromArgb(13, 13, 24),
-                Padding = new Padding(8, 0, 0, 0)
+                Height = 46,
+                BackColor = Color.FromArgb(16, 16, 24),
+                Padding = new Padding(12, 5, 12, 5)
             };
-            _topBar.MouseDown += OnTopBarMouseDown;
 
-            // App title / Logo icon
-            _lblTitle = new Label
+            // 2. Tab Switcher Box
+            _tabPanel = new Panel
             {
-                Text = "⚡ BlackTube",
-                Font = new Font("Segoe UI", 10.5f, FontStyle.Bold),
-                ForeColor = Color.FromArgb(255, 255, 255),
-                AutoSize = true,
-                Location = new Point(12, 12),
-                Cursor = Cursors.Hand
+                Dock = DockStyle.Left,
+                Width = 280,
+                BackColor = Color.FromArgb(24, 24, 36)
             };
-            _lblTitle.MouseDown += OnTopBarMouseDown;
-            _topBar.Controls.Add(_lblTitle);
-
-            // Tab bar switcher
-            _tabContainer = new Panel
+            _tabPanel.Paint += (s, e) =>
             {
-                Location = new Point(140, 4),
-                Size = new Size(270, 36),
-                BackColor = Color.FromArgb(20, 20, 32)
-            };
-            _tabContainer.Paint += (s, e) =>
-            {
-                using (var pen = new Pen(Color.FromArgb(40, 40, 60), 1))
+                using (var pen = new Pen(Color.FromArgb(45, 45, 65), 1))
                 {
-                    e.Graphics.DrawRectangle(pen, 0, 0, _tabContainer.Width - 1, _tabContainer.Height - 1);
+                    e.Graphics.DrawRectangle(pen, 0, 0, _tabPanel.Width - 1, _tabPanel.Height - 1);
                 }
             };
 
-            _btnYouTube = CreateTabButton("🎬 YouTube", 0);
-            _btnYouTube.Click += (s, e) => SwitchTab(false);
-
-            _btnMusic = CreateTabButton("🎵 YT Music", 135);
-            _btnMusic.Click += (s, e) => SwitchTab(true);
-
-            _tabContainer.Controls.Add(_btnYouTube);
-            _tabContainer.Controls.Add(_btnMusic);
-            _topBar.Controls.Add(_tabContainer);
-
-            // Action Buttons
-            int rightOffset = 10;
-
-            _btnClose = CreateTitleButton("✕", rightOffset, Color.FromArgb(232, 17, 35));
-            _btnClose.Click += (s, e) =>
+            _btnYouTube = new Button
             {
-                this.Hide();
-                if (_trayIcon != null)
-                {
-                    _trayIcon.ShowBalloonTip(1500, "BlackTube", "Minimized to tray. Right-click icon to quit.", ToolTipIcon.Info);
-                }
-            };
-            rightOffset += 45;
-
-            _btnMax = CreateTitleButton("▢", rightOffset);
-            _btnMax.Click += (s, e) =>
-            {
-                this.WindowState = this.WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized;
-            };
-            rightOffset += 45;
-
-            _btnMin = CreateTitleButton("―", rightOffset);
-            _btnMin.Click += (s, e) => { this.WindowState = FormWindowState.Minimized; };
-            rightOffset += 45;
-
-            _btnPin = CreateTitleButton("📌", rightOffset);
-            _btnPin.Font = new Font("Segoe UI Emoji", 9f);
-            _btnPin.Click += (s, e) => ToggleAlwaysOnTop();
-            rightOffset += 45;
-
-            _btnPip = CreateTitleButton("⧉", rightOffset);
-            _btnPip.Font = new Font("Segoe UI", 11f);
-            _btnPip.Click += (s, e) => TogglePipMode();
-            rightOffset += 45;
-
-            _btnSleep = CreateTitleButton("⏱", rightOffset);
-            _btnSleep.Font = new Font("Segoe UI Emoji", 10f);
-            _btnSleep.Click += (s, e) => ShowSleepTimerMenu();
-
-            _topBar.Controls.Add(_btnClose);
-            _topBar.Controls.Add(_btnMax);
-            _topBar.Controls.Add(_btnMin);
-            _topBar.Controls.Add(_btnPin);
-            _topBar.Controls.Add(_btnPip);
-            _topBar.Controls.Add(_btnSleep);
-
-            this.Controls.Add(_topBar);
-
-            UpdateTabStyles();
-        }
-
-        private Button CreateTabButton(string text, int x)
-        {
-            var btn = new Button
-            {
-                Text = text,
-                Location = new Point(x, 0),
-                Size = new Size(135, 36),
+                Text = "🎬 YouTube",
+                Dock = DockStyle.Left,
+                Width = 140,
                 FlatStyle = FlatStyle.Flat,
                 Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
                 Cursor = Cursors.Hand,
                 TextAlign = ContentAlignment.MiddleCenter
             };
-            btn.FlatAppearance.BorderSize = 0;
-            return btn;
+            _btnYouTube.FlatAppearance.BorderSize = 0;
+            _btnYouTube.Click += (s, e) => SwitchTab(false);
+
+            _btnMusic = new Button
+            {
+                Text = "🎵 YT Music",
+                Dock = DockStyle.Right,
+                Width = 140,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                Cursor = Cursors.Hand,
+                TextAlign = ContentAlignment.MiddleCenter
+            };
+            _btnMusic.FlatAppearance.BorderSize = 0;
+            _btnMusic.Click += (s, e) => SwitchTab(true);
+
+            _tabPanel.Controls.Add(_btnMusic);
+            _tabPanel.Controls.Add(_btnYouTube);
+            _navBar.Controls.Add(_tabPanel);
+
+            // 3. Quick Action Buttons (Right Aligned Flow)
+            var actionFlow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Right,
+                AutoSize = true,
+                FlowDirection = FlowDirection.RightToLeft,
+                WrapContents = false,
+                BackColor = Color.Transparent
+            };
+
+            _btnReload = CreateToolButton("↻", "Reload current page (Ctrl+R / F5)", (s, e) => ReloadActiveView());
+            _btnPin = CreateToolButton("📌", "Toggle Always On Top (Ctrl+Shift+T)", (s, e) => ToggleAlwaysOnTop());
+            _btnPip = CreateToolButton("⧉", "Toggle Picture-in-Picture (Ctrl+Shift+P)", (s, e) => TogglePipMode());
+            _btnSleep = CreateToolButton("⏱", "Sleep Timer (Ctrl+Shift+S)", (s, e) => ShowSleepTimerMenu());
+
+            actionFlow.Controls.Add(_btnReload);
+            actionFlow.Controls.Add(_btnPin);
+            actionFlow.Controls.Add(_btnPip);
+            actionFlow.Controls.Add(_btnSleep);
+
+            _navBar.Controls.Add(actionFlow);
+            this.Controls.Add(_navBar);
+
+            // 4. Content Area for WebViews
+            _contentPanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.FromArgb(8, 8, 12)
+            };
+            this.Controls.Add(_contentPanel);
+
+            UpdateTabStyles();
         }
 
-        private Button CreateTitleButton(string text, int rightOffset, Color? hoverColor = null)
+        private Button CreateToolButton(string text, string tooltipText, EventHandler onClick)
         {
             var btn = new Button
             {
                 Text = text,
-                Anchor = AnchorStyles.Top | AnchorStyles.Right,
-                Location = new Point(this.Width - rightOffset, 0),
-                Size = new Size(45, 44),
+                Size = new Size(42, 34),
+                Margin = new Padding(4, 1, 0, 0),
                 FlatStyle = FlatStyle.Flat,
-                ForeColor = Color.FromArgb(180, 180, 200),
-                BackColor = Color.Transparent,
-                Font = new Font("Segoe UI", 9f),
+                ForeColor = Color.FromArgb(190, 190, 215),
+                BackColor = Color.FromArgb(24, 24, 36),
+                Font = new Font("Segoe UI Emoji", 10f, FontStyle.Regular),
                 Cursor = Cursors.Hand
             };
-            btn.FlatAppearance.BorderSize = 0;
-            btn.MouseEnter += (s, e) => { btn.BackColor = hoverColor ?? Color.FromArgb(40, 40, 60); btn.ForeColor = Color.White; };
-            btn.MouseLeave += (s, e) => { btn.BackColor = Color.Transparent; btn.ForeColor = Color.FromArgb(180, 180, 200); };
-            return btn;
-        }
+            btn.FlatAppearance.BorderColor = Color.FromArgb(45, 45, 65);
+            btn.FlatAppearance.BorderSize = 1;
+            btn.MouseEnter += (s, e) => { btn.BackColor = Color.FromArgb(40, 40, 60); btn.ForeColor = Color.White; };
+            btn.MouseLeave += (s, e) => { btn.BackColor = Color.FromArgb(24, 24, 36); btn.ForeColor = Color.FromArgb(190, 190, 215); };
+            btn.Click += onClick;
 
-        private void OnTopBarMouseDown(object sender, MouseEventArgs e)
-        {
-            if (e.Button == MouseButtons.Left)
-            {
-                ReleaseCapture();
-                SendMessage(this.Handle, WM_NCLBUTTONDOWN, (IntPtr)HT_CAPTION, IntPtr.Zero);
-            }
+            var tt = new ToolTip();
+            tt.SetToolTip(btn, tooltipText);
+
+            return btn;
         }
 
         private void UpdateTabStyles()
@@ -254,14 +273,14 @@ namespace BlackTube
                 _btnYouTube.BackColor = Color.FromArgb(255, 0, 64);
                 _btnYouTube.ForeColor = Color.White;
                 _btnMusic.BackColor = Color.Transparent;
-                _btnMusic.ForeColor = Color.FromArgb(140, 140, 160);
+                _btnMusic.ForeColor = Color.FromArgb(140, 140, 165);
             }
             else
             {
                 _btnMusic.BackColor = Color.FromArgb(168, 85, 247);
                 _btnMusic.ForeColor = Color.White;
                 _btnYouTube.BackColor = Color.Transparent;
-                _btnYouTube.ForeColor = Color.FromArgb(140, 140, 160);
+                _btnYouTube.ForeColor = Color.FromArgb(140, 140, 165);
             }
         }
 
@@ -282,26 +301,39 @@ namespace BlackTube
             MemoryTrimmer.Trim();
         }
 
+        private void ReloadActiveView()
+        {
+            WebView2 active = _isMusicActive ? _musicWebView : _ytWebView;
+            if (active != null && active.CoreWebView2 != null)
+            {
+                active.CoreWebView2.Reload();
+            }
+        }
+
         // ── WebView2 Initialization ──
-        private async System.Threading.Tasks.Task InitializeWebViewsAsync()
+        private async Task InitializeWebViewsAsync()
         {
             try
             {
+                Log("InitializeWebViewsAsync starting");
+
                 string userDataFolder = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                     "BlackTube-webview2");
 
-                var envOptions = new CoreWebView2EnvironmentOptions(
+                if (!Directory.Exists(userDataFolder))
+                    Directory.CreateDirectory(userDataFolder);
+
+                var options = new CoreWebView2EnvironmentOptions();
+                options.AdditionalBrowserArguments =
                     "--enable-gpu-rasterization " +
                     "--ignore-gpu-blocklist " +
                     "--enable-zero-copy " +
                     "--disk-cache-size=33554432 " +
-                    "--media-cache-size=33554432 " +
-                    "--enable-features=PlatformHEVCDecoderSupport,HardwareMediaKeyHandling " +
-                    "--js-flags=--max-old-space-size=192"
-                );
+                    "--enable-features=PlatformHEVCDecoderSupport,HardwareMediaKeyHandling";
 
-                CoreWebView2Environment env = await CoreWebView2Environment.CreateAsync(null, userDataFolder, envOptions);
+                CoreWebView2Environment env = await CoreWebView2Environment.CreateAsync(null, userDataFolder, options);
+                Log("CoreWebView2Environment created");
 
                 // 1. YouTube WebView
                 _ytWebView = new WebView2
@@ -309,13 +341,11 @@ namespace BlackTube
                     Dock = DockStyle.Fill,
                     Visible = true
                 };
-                this.Controls.Add(_ytWebView);
-                _ytWebView.BringToFront();
-                _topBar.BringToFront();
-
+                _contentPanel.Controls.Add(_ytWebView);
                 await _ytWebView.EnsureCoreWebView2Async(env);
                 await AdShieldEngine.AttachAdShieldAsync(_ytWebView);
                 _ytWebView.CoreWebView2.Navigate("https://www.youtube.com");
+                Log("YouTube WebView initialized");
 
                 // 2. YouTube Music WebView
                 _musicWebView = new WebView2
@@ -323,15 +353,16 @@ namespace BlackTube
                     Dock = DockStyle.Fill,
                     Visible = false
                 };
-                this.Controls.Add(_musicWebView);
-
+                _contentPanel.Controls.Add(_musicWebView);
                 await _musicWebView.EnsureCoreWebView2Async(env);
                 await AdShieldEngine.AttachAdShieldAsync(_musicWebView);
                 _musicWebView.CoreWebView2.Navigate("https://music.youtube.com");
+                Log("YouTube Music WebView initialized");
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Error initializing WebView2: " + ex.Message, "BlackTube Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Log("FATAL WebView2 Init: " + ex.ToString());
+                MessageBox.Show("Failed to initialize browser engine: " + ex.Message, "BlackTube Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -368,19 +399,23 @@ namespace BlackTube
             _trayMenu = new ContextMenuStrip();
             _trayMenu.BackColor = Color.FromArgb(18, 18, 28);
             _trayMenu.ForeColor = Color.White;
-            _trayMenu.RenderMode = ToolStripRenderMode.System;
 
-            _trayMenu.Items.Add("🎬 Switch to YouTube", null, (s, e) => { ShowApp(); SwitchTab(false); });
-            _trayMenu.Items.Add("🎵 Switch to YT Music", null, (s, e) => { ShowApp(); SwitchTab(true); });
+            _trayMenu.Items.Add("🎬 YouTube", null, (s, e) => { ShowApp(); SwitchTab(false); });
+            _trayMenu.Items.Add("🎵 YT Music", null, (s, e) => { ShowApp(); SwitchTab(true); });
             _trayMenu.Items.Add(new ToolStripSeparator());
             _trayMenu.Items.Add("⏯ Play / Pause", null, (s, e) => ExecuteMediaAction("toggle"));
             _trayMenu.Items.Add("⏭ Next Track", null, (s, e) => ExecuteMediaAction("next"));
             _trayMenu.Items.Add("⏮ Previous Track", null, (s, e) => ExecuteMediaAction("prev"));
             _trayMenu.Items.Add(new ToolStripSeparator());
             _trayMenu.Items.Add("⏱ Sleep Timer", null, (s, e) => ShowSleepTimerMenu());
-            _trayMenu.Items.Add("⧉ Toggle PiP Mode", null, (s, e) => TogglePipMode());
+            _trayMenu.Items.Add("⧉ PiP Mode", null, (s, e) => TogglePipMode());
             _trayMenu.Items.Add(new ToolStripSeparator());
-            _trayMenu.Items.Add("✕ Quit BlackTube", null, (s, e) => { _trayIcon.Visible = false; Application.Exit(); });
+            _trayMenu.Items.Add("✕ Exit BlackTube", null, (s, e) =>
+            {
+                _isExiting = true;
+                _trayIcon.Visible = false;
+                Application.Exit();
+            });
 
             _trayIcon = new NotifyIcon
             {
@@ -401,7 +436,7 @@ namespace BlackTube
             this.Activate();
         }
 
-        // ── Timers: Sleep & GC ──
+        // ── Sleep Timer & GC ──
         private void SetupTimers()
         {
             _sleepTimer = new Timer { Interval = 1000 };
@@ -419,7 +454,7 @@ namespace BlackTube
                     {
                         _sleepTimer.Stop();
                         _btnSleep.Text = "⏱";
-                        _btnSleep.ForeColor = Color.FromArgb(180, 180, 200);
+                        _btnSleep.ForeColor = Color.FromArgb(190, 190, 215);
                         ExecuteMediaAction("toggle");
                         if (_ytWebView != null && _ytWebView.CoreWebView2 != null)
                             _ytWebView.CoreWebView2.ExecuteScriptAsync("var v=document.querySelector('video');if(v)v.pause();");
@@ -439,7 +474,7 @@ namespace BlackTube
         private void ShowSleepTimerMenu()
         {
             var menu = new ContextMenuStrip();
-            menu.BackColor = Color.FromArgb(22, 22, 34);
+            menu.BackColor = Color.FromArgb(24, 24, 36);
             menu.ForeColor = Color.White;
 
             menu.Items.Add("Turn Off Timer", null, (s, e) =>
@@ -447,7 +482,7 @@ namespace BlackTube
                 _sleepTimer.Stop();
                 _sleepRemainingSeconds = 0;
                 _btnSleep.Text = "⏱";
-                _btnSleep.ForeColor = Color.FromArgb(180, 180, 200);
+                _btnSleep.ForeColor = Color.FromArgb(190, 190, 215);
             });
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("15 Minutes", null, (s, e) => StartSleep(15 * 60));
@@ -471,20 +506,20 @@ namespace BlackTube
             _isPipMode = !_isPipMode;
             if (_isPipMode)
             {
-                _prePipBounds = this.Bounds;
-                _prePipState = this.WindowState;
+                _normalBounds = this.Bounds;
+                _normalState = this.WindowState;
                 this.WindowState = FormWindowState.Normal;
                 this.TopMost = true;
-                this.Size = new Size(480, 310);
-                this.Location = new Point(Screen.PrimaryScreen.WorkingArea.Right - 500, Screen.PrimaryScreen.WorkingArea.Bottom - 330);
+                this.Size = new Size(500, 330);
+                this.Location = new Point(Screen.PrimaryScreen.WorkingArea.Right - 520, Screen.PrimaryScreen.WorkingArea.Bottom - 350);
                 _btnPip.ForeColor = Color.FromArgb(0, 255, 170);
             }
             else
             {
                 this.TopMost = _isAlwaysOnTop;
-                this.Bounds = _prePipBounds;
-                this.WindowState = _prePipState;
-                _btnPip.ForeColor = Color.FromArgb(180, 180, 200);
+                this.Bounds = _normalBounds;
+                this.WindowState = _normalState;
+                _btnPip.ForeColor = Color.FromArgb(190, 190, 215);
             }
         }
 
@@ -492,7 +527,7 @@ namespace BlackTube
         {
             _isAlwaysOnTop = !_isAlwaysOnTop;
             this.TopMost = _isAlwaysOnTop;
-            _btnPin.ForeColor = _isAlwaysOnTop ? Color.FromArgb(0, 255, 170) : Color.FromArgb(180, 180, 200);
+            _btnPin.ForeColor = _isAlwaysOnTop ? Color.FromArgb(0, 255, 170) : Color.FromArgb(190, 190, 215);
         }
 
         // ── Hotkeys ──
@@ -548,8 +583,7 @@ namespace BlackTube
             }
             if (keyData == (Keys.Control | Keys.R) || keyData == Keys.F5)
             {
-                WebView2 active = _isMusicActive ? _musicWebView : _ytWebView;
-                if (active != null && active.CoreWebView2 != null) active.CoreWebView2.Reload();
+                ReloadActiveView();
                 return true;
             }
             if (keyData == (Keys.Control | Keys.M))
@@ -559,23 +593,12 @@ namespace BlackTube
             }
             if (keyData == (Keys.Control | Keys.Q))
             {
+                _isExiting = true;
                 _trayIcon.Visible = false;
                 Application.Exit();
                 return true;
             }
             return base.ProcessCmdKey(ref msg, keyData);
-        }
-
-        protected override void OnFormClosing(FormClosingEventArgs e)
-        {
-            try
-            {
-                UnregisterHotKey(this.Handle, HOTKEY_PLAY_PAUSE);
-                UnregisterHotKey(this.Handle, HOTKEY_NEXT);
-                UnregisterHotKey(this.Handle, HOTKEY_PREV);
-            }
-            catch { }
-            base.OnFormClosing(e);
         }
     }
 }
