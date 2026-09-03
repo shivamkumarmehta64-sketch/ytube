@@ -1,0 +1,6 @@
+*.res
+GenRes.exe
+bin/
+obj/
+*.log
+.vs/
