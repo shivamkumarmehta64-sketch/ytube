@@ -243,7 +243,8 @@ namespace BlackTube
             '.ytmusic-mealbar-promo,.ytmusic-ad-slot,ytmusic-ad-slot,[is-music-ad]',
             'ytd-shorts-ad,ytd-reel-ad,ytd-reel-shelf-renderer:has(ytd-ad-slot-renderer)',
             '[data-is-ad],[is-ad],[data-ad],[ad-data]'
-        ].join(',') + '{display:none!important;visibility:hidden!important;height:0!important;width:0!important;pointer-events:none!important}';
+        ].join(',') + '{display:none!important;visibility:hidden!important;height:0!important;width:0!important;pointer-events:none!important} ' +
+        'html, body { background-color: #0f0f0f !important; color-scheme: dark !important; }';
         (document.head || document.documentElement).appendChild(style);
     }
     injectAdCSS();

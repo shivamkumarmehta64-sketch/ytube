@@ -107,8 +107,8 @@ static class GenRes
         // StringTable "040904B0": a String entry per key.
         string[] keys = { "CompanyName", "FileDescription", "FileVersion", "InternalName",
                           "LegalCopyright", "OriginalFilename", "ProductName", "ProductVersion" };
-        string[] vals = { "Black Firefox", "Black Firefox", "9.0.0.0", "BlackFirefox",
-                          "Black Firefox", "Black.exe", "Black Firefox", "9.0.0.0" };
+        string[] vals = { "BlackTube", "BlackTube - YouTube Desktop", "1.0.0.0", "BlackTube",
+                          "BlackTube", "BlackTube.exe", "BlackTube", "1.0.0.0" };
 
         // Build StringFileInfo (wType=1)
         MemoryStream sfi = new MemoryStream();

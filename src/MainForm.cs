@@ -13,31 +13,58 @@ namespace BlackTube
 {
     public class MainForm : Form
     {
-        // ── DWM Immersive Dark Mode ──
+        // ── Win32 / DWM Attributes ──
         [DllImport("dwmapi.dll")]
         private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
-        private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
-        private const int DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19;
 
-        private static void EnableDarkMode(IntPtr handle)
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+        [DllImport("user32.dll")]
+        private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+        private const int DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19;
+        private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+        private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+        private const int DWMWA_CAPTION_COLOR = 35;
+        private const int DWMWA_TEXT_COLOR = 36;
+        private const int DWMWCP_ROUND = 2;
+        private const int SW_RESTORE = 9;
+
+        private static readonly int WM_SHOWME = Program.RegisterWindowMessage("WM_BLACKTUBE_SHOW_YOUTUBE");
+
+        private static void ApplyWindowsTheme(IntPtr handle)
         {
             try
             {
+                // Immersive Dark Mode
                 int darkMode = 1;
                 if (DwmSetWindowAttribute(handle, DWMWA_USE_IMMERSIVE_DARK_MODE, ref darkMode, sizeof(int)) != 0)
                 {
                     DwmSetWindowAttribute(handle, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, ref darkMode, sizeof(int));
                 }
+
+                // Windows 11 Rounded Corners
+                int cornerPref = DWMWCP_ROUND;
+                DwmSetWindowAttribute(handle, DWMWA_WINDOW_CORNER_PREFERENCE, ref cornerPref, sizeof(int));
+
+                // Dark Title Bar & White Title Text
+                int captionColor = 0x000F0F0F; // BGR format for #0F0F0F
+                DwmSetWindowAttribute(handle, DWMWA_CAPTION_COLOR, ref captionColor, sizeof(int));
+
+                int textColor = 0x00FFFFFF;
+                DwmSetWindowAttribute(handle, DWMWA_TEXT_COLOR, ref textColor, sizeof(int));
             }
             catch { }
         }
 
         // ── Global Hotkeys ──
-        [DllImport("user32.dll")]
-        private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
-        [DllImport("user32.dll")]
-        private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
-
         private const int WM_HOTKEY = 0x0312;
         private const uint VK_MEDIA_NEXT_TRACK = 0xB0;
         private const uint VK_MEDIA_PREV_TRACK = 0xB1;
@@ -49,27 +76,31 @@ namespace BlackTube
 
         // ── UI Components ──
         private Panel _navBar;
-        private Panel _tabPanel;
-        private Button _btnYouTube;
-        private Button _btnMusic;
-        private Button _btnSleep;
-        private Button _btnPip;
-        private Button _btnPin;
+        private FlowLayoutPanel _navLeftFlow;
+        private FlowLayoutPanel _navRightFlow;
+        private Button _btnBack;
+        private Button _btnForward;
         private Button _btnReload;
+        private Button _btnHome;
+        private Button _btnSearch;
+        private Button _btnPin;
+        private Button _btnPip;
+        private Button _btnFullScreen;
+        private Button _btnSleep;
         private Panel _contentPanel;
-
         private WebView2 _ytWebView;
-        private WebView2 _musicWebView;
-        private bool _isMusicActive = false;
+
         private bool _isPipMode = false;
         private bool _isAlwaysOnTop = false;
+        private bool _isFullScreen = false;
 
-        private Rectangle _normalBounds;
-        private FormWindowState _normalState;
+        // Window state restoration for fullscreen & PiP
+        private FormBorderStyle _savedBorderStyle = FormBorderStyle.Sizable;
+        private FormWindowState _savedWindowState = FormWindowState.Normal;
+        private Rectangle _savedBounds;
 
         private NotifyIcon _trayIcon;
         private ContextMenuStrip _trayMenu;
-        private bool _isExiting = false;
 
         private Timer _sleepTimer;
         private int _sleepRemainingSeconds = 0;
@@ -83,13 +114,14 @@ namespace BlackTube
             _logPath = Path.Combine(Application.StartupPath, "debug.log");
             Log("MainForm constructor starting");
 
-            this.Text = "BlackTube - YouTube & YT Music";
+            this.Text = "BlackTube - YouTube";
             this.Width = 1280;
             this.Height = 820;
-            this.MinimumSize = new Size(420, 260);
+            this.MinimumSize = new Size(480, 320);
             this.StartPosition = FormStartPosition.CenterScreen;
-            this.BackColor = Color.FromArgb(12, 12, 18);
+            this.BackColor = Color.FromArgb(15, 15, 15);
             this.ForeColor = Color.White;
+            this.ShowInTaskbar = true;
 
             string iconPath = Path.Combine(Application.StartupPath, "icon.ico");
             if (File.Exists(iconPath))
@@ -102,42 +134,35 @@ namespace BlackTube
             SetupTimers();
             SetupHotkeys();
 
-            this.HandleCreated += (s, e) => EnableDarkMode(this.Handle);
+            this.HandleCreated += (s, e) => ApplyWindowsTheme(this.Handle);
 
             this.Load += async (s, e) =>
             {
-                EnableDarkMode(this.Handle);
-                await InitializeWebViewsAsync();
+                ApplyWindowsTheme(this.Handle);
+                await InitializeWebViewAsync();
             };
 
-            this.Resize += (s, e) =>
+            this.Shown += (s, e) =>
             {
-                if (this.WindowState == FormWindowState.Minimized)
-                {
-                    MemoryTrimmer.Trim();
-                }
+                ApplyWindowsTheme(this.Handle);
+                this.Activate();
+                this.BringToFront();
             };
 
             this.FormClosing += (s, e) =>
             {
-                if (!_isExiting && e.CloseReason == CloseReason.UserClosing)
+                try
                 {
-                    e.Cancel = true;
-                    this.Hide();
-                    if (_trayIcon != null)
-                    {
-                        _trayIcon.ShowBalloonTip(1200, "BlackTube", "Minimized to tray. Right-click icon to quit.", ToolTipIcon.Info);
-                    }
+                    UnregisterHotKey(this.Handle, HOTKEY_PLAY_PAUSE);
+                    UnregisterHotKey(this.Handle, HOTKEY_NEXT);
+                    UnregisterHotKey(this.Handle, HOTKEY_PREV);
                 }
-                else
+                catch { }
+
+                if (_trayIcon != null)
                 {
-                    try
-                    {
-                        UnregisterHotKey(this.Handle, HOTKEY_PLAY_PAUSE);
-                        UnregisterHotKey(this.Handle, HOTKEY_NEXT);
-                        UnregisterHotKey(this.Handle, HOTKEY_PREV);
-                    }
-                    catch { }
+                    _trayIcon.Visible = false;
+                    _trayIcon.Dispose();
                 }
             };
         }
@@ -153,111 +178,147 @@ namespace BlackTube
 
         private void SetupUI()
         {
-            // 1. Navigation Top Bar
+            // 1. Navigation Header Bar (Compact Windows 11 Fluent Dark UI)
             _navBar = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 46,
-                BackColor = Color.FromArgb(16, 16, 24),
-                Padding = new Padding(12, 5, 12, 5)
+                Height = 36,
+                BackColor = Color.FromArgb(15, 15, 15),
+                Padding = new Padding(8, 2, 8, 2)
             };
 
-            // 2. Tab Switcher Box
-            _tabPanel = new Panel
+            _navBar.Paint += (s, e) =>
             {
-                Dock = DockStyle.Left,
-                Width = 280,
-                BackColor = Color.FromArgb(24, 24, 36)
-            };
-            _tabPanel.Paint += (s, e) =>
-            {
-                using (var pen = new Pen(Color.FromArgb(45, 45, 65), 1))
+                using (var pen = new Pen(Color.FromArgb(32, 32, 32), 1))
                 {
-                    e.Graphics.DrawRectangle(pen, 0, 0, _tabPanel.Width - 1, _tabPanel.Height - 1);
+                    e.Graphics.DrawLine(pen, 0, _navBar.Height - 1, _navBar.Width, _navBar.Height - 1);
                 }
             };
 
-            _btnYouTube = new Button
+            // 2. Left Flow (Navigation: Back, Forward, Reload, Home, Brand Badge)
+            _navLeftFlow = new FlowLayoutPanel
             {
-                Text = "🎬 YouTube",
                 Dock = DockStyle.Left,
-                Width = 140,
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
-                Cursor = Cursors.Hand,
-                TextAlign = ContentAlignment.MiddleCenter
+                AutoSize = true,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0)
             };
-            _btnYouTube.FlatAppearance.BorderSize = 0;
-            _btnYouTube.Click += (s, e) => SwitchTab(false);
 
-            _btnMusic = new Button
+            _btnBack = CreateNavButton("‹", "Go Back (Alt+Left)", (s, e) => NavigateBack());
+            _btnBack.Font = new Font("Segoe UI", 12f, FontStyle.Bold);
+            _btnBack.Enabled = false;
+
+            _btnForward = CreateNavButton("›", "Go Forward (Alt+Right)", (s, e) => NavigateForward());
+            _btnForward.Font = new Font("Segoe UI", 12f, FontStyle.Bold);
+            _btnForward.Enabled = false;
+
+            _btnReload = CreateNavButton("↻", "Reload (Ctrl+R / F5)", (s, e) => ReloadView());
+            _btnReload.Font = new Font("Segoe UI", 10.5f, FontStyle.Regular);
+
+            _btnHome = CreateNavButton("⌂", "Go to YouTube Home (Ctrl+H)", (s, e) => NavigateHome());
+            _btnHome.Font = new Font("Segoe UI", 11.5f, FontStyle.Regular);
+
+            var navSeparator = new Panel
             {
-                Text = "🎵 YT Music",
-                Dock = DockStyle.Right,
-                Width = 140,
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
-                Cursor = Cursors.Hand,
-                TextAlign = ContentAlignment.MiddleCenter
+                Width = 1,
+                Height = 18,
+                BackColor = Color.FromArgb(40, 40, 40),
+                Margin = new Padding(5, 6, 5, 0)
             };
-            _btnMusic.FlatAppearance.BorderSize = 0;
-            _btnMusic.Click += (s, e) => SwitchTab(true);
 
-            _tabPanel.Controls.Add(_btnMusic);
-            _tabPanel.Controls.Add(_btnYouTube);
-            _navBar.Controls.Add(_tabPanel);
+            _btnSearch = new Button
+            {
+                Text = "🔍  Search (Ctrl+F)",
+                Size = new Size(180, 28),
+                Margin = new Padding(2, 2, 4, 0),
+                FlatStyle = FlatStyle.Flat,
+                ForeColor = Color.FromArgb(160, 160, 175),
+                BackColor = Color.FromArgb(24, 24, 24),
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Regular),
+                Cursor = Cursors.Hand,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(8, 0, 0, 0)
+            };
+            _btnSearch.FlatAppearance.BorderColor = Color.FromArgb(42, 42, 42);
+            _btnSearch.FlatAppearance.BorderSize = 1;
+            _btnSearch.MouseEnter += (s, e) => { _btnSearch.BackColor = Color.FromArgb(34, 34, 34); _btnSearch.ForeColor = Color.White; };
+            _btnSearch.MouseLeave += (s, e) => { _btnSearch.BackColor = Color.FromArgb(24, 24, 24); _btnSearch.ForeColor = Color.FromArgb(160, 160, 175); };
+            _btnSearch.Click += (s, e) => FocusYouTubeSearch();
 
-            // 3. Quick Action Buttons (Right Aligned Flow)
-            var actionFlow = new FlowLayoutPanel
+            _navLeftFlow.Controls.Add(_btnBack);
+            _navLeftFlow.Controls.Add(_btnForward);
+            _navLeftFlow.Controls.Add(_btnReload);
+            _navLeftFlow.Controls.Add(_btnHome);
+            _navLeftFlow.Controls.Add(navSeparator);
+            _navLeftFlow.Controls.Add(_btnSearch);
+
+            // 3. Right Flow (Quick Actions: Pin, PiP, Sleep, Fullscreen)
+            _navRightFlow = new FlowLayoutPanel
             {
                 Dock = DockStyle.Right,
                 AutoSize = true,
                 FlowDirection = FlowDirection.RightToLeft,
                 WrapContents = false,
-                BackColor = Color.Transparent
+                BackColor = Color.Transparent,
+                Margin = new Padding(0)
             };
 
-            _btnReload = CreateToolButton("↻", "Reload current page (Ctrl+R / F5)", (s, e) => ReloadActiveView());
-            _btnPin = CreateToolButton("📌", "Toggle Always On Top (Ctrl+Shift+T)", (s, e) => ToggleAlwaysOnTop());
-            _btnPip = CreateToolButton("⧉", "Toggle Picture-in-Picture (Ctrl+Shift+P)", (s, e) => TogglePipMode());
+            _btnFullScreen = CreateToolButton("⛶", "Toggle Full Screen (F11)", (s, e) => ToggleFullScreen());
+            _btnPin = CreateToolButton("📌", "Always On Top (Ctrl+Shift+T)", (s, e) => ToggleAlwaysOnTop());
+            _btnPip = CreateToolButton("⧉", "Picture-in-Picture Mini Player (Ctrl+Shift+P)", (s, e) => TogglePipMode());
             _btnSleep = CreateToolButton("⏱", "Sleep Timer (Ctrl+Shift+S)", (s, e) => ShowSleepTimerMenu());
 
-            actionFlow.Controls.Add(_btnReload);
-            actionFlow.Controls.Add(_btnPin);
-            actionFlow.Controls.Add(_btnPip);
-            actionFlow.Controls.Add(_btnSleep);
+            _navRightFlow.Controls.Add(_btnFullScreen);
+            _navRightFlow.Controls.Add(_btnPin);
+            _navRightFlow.Controls.Add(_btnPip);
+            _navRightFlow.Controls.Add(_btnSleep);
 
-            _navBar.Controls.Add(actionFlow);
+            _navBar.Controls.Add(_navRightFlow);
+            _navBar.Controls.Add(_navLeftFlow);
             this.Controls.Add(_navBar);
 
-            // 4. Content Area for WebViews
+            // 4. Content Area for YouTube WebView2
             _contentPanel = new Panel
             {
                 Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(8, 8, 12)
+                BackColor = Color.FromArgb(15, 15, 15)
             };
-            this.Controls.Add(_contentPanel);
 
-            UpdateTabStyles();
+            _ytWebView = new WebView2
+            {
+                Dock = DockStyle.Fill,
+                Visible = true,
+                BackColor = Color.FromArgb(15, 15, 15)
+            };
+            _contentPanel.Controls.Add(_ytWebView);
+            this.Controls.Add(_contentPanel);
         }
 
-        private Button CreateToolButton(string text, string tooltipText, EventHandler onClick)
+        private Button CreateNavButton(string text, string tooltipText, EventHandler onClick)
         {
             var btn = new Button
             {
                 Text = text,
-                Size = new Size(42, 34),
-                Margin = new Padding(4, 1, 0, 0),
+                Size = new Size(30, 28),
+                Margin = new Padding(1, 2, 1, 0),
                 FlatStyle = FlatStyle.Flat,
-                ForeColor = Color.FromArgb(190, 190, 215),
-                BackColor = Color.FromArgb(24, 24, 36),
-                Font = new Font("Segoe UI Emoji", 10f, FontStyle.Regular),
-                Cursor = Cursors.Hand
+                ForeColor = Color.FromArgb(200, 200, 220),
+                BackColor = Color.FromArgb(24, 24, 24),
+                Cursor = Cursors.Hand,
+                TextAlign = ContentAlignment.MiddleCenter
             };
-            btn.FlatAppearance.BorderColor = Color.FromArgb(45, 45, 65);
+            btn.FlatAppearance.BorderColor = Color.FromArgb(42, 42, 42);
             btn.FlatAppearance.BorderSize = 1;
-            btn.MouseEnter += (s, e) => { btn.BackColor = Color.FromArgb(40, 40, 60); btn.ForeColor = Color.White; };
-            btn.MouseLeave += (s, e) => { btn.BackColor = Color.FromArgb(24, 24, 36); btn.ForeColor = Color.FromArgb(190, 190, 215); };
+            btn.MouseEnter += (s, e) => { if (btn.Enabled) { btn.BackColor = Color.FromArgb(38, 38, 38); btn.ForeColor = Color.White; } };
+            btn.MouseLeave += (s, e) => { if (btn.Enabled) { btn.BackColor = Color.FromArgb(24, 24, 24); btn.ForeColor = Color.FromArgb(200, 200, 220); } };
+            btn.EnabledChanged += (s, e) =>
+            {
+                btn.ForeColor = btn.Enabled ? Color.FromArgb(200, 200, 220) : Color.FromArgb(80, 80, 95);
+                btn.BackColor = btn.Enabled ? Color.FromArgb(24, 24, 24) : Color.FromArgb(18, 18, 18);
+                btn.FlatAppearance.BorderColor = btn.Enabled ? Color.FromArgb(42, 42, 42) : Color.FromArgb(28, 28, 28);
+            };
             btn.Click += onClick;
 
             var tt = new ToolTip();
@@ -266,56 +327,38 @@ namespace BlackTube
             return btn;
         }
 
-        private void UpdateTabStyles()
+        private Button CreateToolButton(string text, string tooltipText, EventHandler onClick)
         {
-            if (!_isMusicActive)
+            var btn = new Button
             {
-                _btnYouTube.BackColor = Color.FromArgb(255, 0, 64);
-                _btnYouTube.ForeColor = Color.White;
-                _btnMusic.BackColor = Color.Transparent;
-                _btnMusic.ForeColor = Color.FromArgb(140, 140, 165);
-            }
-            else
-            {
-                _btnMusic.BackColor = Color.FromArgb(168, 85, 247);
-                _btnMusic.ForeColor = Color.White;
-                _btnYouTube.BackColor = Color.Transparent;
-                _btnYouTube.ForeColor = Color.FromArgb(140, 140, 165);
-            }
-        }
+                Text = text,
+                Size = new Size(32, 28),
+                Margin = new Padding(2, 2, 0, 0),
+                FlatStyle = FlatStyle.Flat,
+                ForeColor = Color.FromArgb(200, 200, 225),
+                BackColor = Color.FromArgb(24, 24, 24),
+                Font = new Font("Segoe UI Emoji", 9.5f, FontStyle.Regular),
+                Cursor = Cursors.Hand,
+                TextAlign = ContentAlignment.MiddleCenter
+            };
+            btn.FlatAppearance.BorderColor = Color.FromArgb(42, 42, 42);
+            btn.FlatAppearance.BorderSize = 1;
+            btn.MouseEnter += (s, e) => { btn.BackColor = Color.FromArgb(38, 38, 38); btn.ForeColor = Color.White; };
+            btn.MouseLeave += (s, e) => { btn.BackColor = Color.FromArgb(24, 24, 24); btn.ForeColor = Color.FromArgb(200, 200, 225); };
+            btn.Click += onClick;
 
-        public void SwitchTab(bool music)
-        {
-            _isMusicActive = music;
-            UpdateTabStyles();
+            var tt = new ToolTip();
+            tt.SetToolTip(btn, tooltipText);
 
-            if (_ytWebView != null && _musicWebView != null)
-            {
-                _ytWebView.Visible = !_isMusicActive;
-                _musicWebView.Visible = _isMusicActive;
-
-                if (_isMusicActive) _musicWebView.Focus();
-                else _ytWebView.Focus();
-            }
-
-            MemoryTrimmer.Trim();
-        }
-
-        private void ReloadActiveView()
-        {
-            WebView2 active = _isMusicActive ? _musicWebView : _ytWebView;
-            if (active != null && active.CoreWebView2 != null)
-            {
-                active.CoreWebView2.Reload();
-            }
+            return btn;
         }
 
         // ── WebView2 Initialization ──
-        private async Task InitializeWebViewsAsync()
+        private async Task InitializeWebViewAsync()
         {
             try
             {
-                Log("InitializeWebViewsAsync starting");
+                Log("InitializeWebViewAsync starting for YouTube");
 
                 string userDataFolder = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -329,66 +372,201 @@ namespace BlackTube
                     "--enable-gpu-rasterization " +
                     "--ignore-gpu-blocklist " +
                     "--enable-zero-copy " +
-                    "--disk-cache-size=33554432 " +
-                    "--enable-features=PlatformHEVCDecoderSupport,HardwareMediaKeyHandling";
+                    "--disk-cache-size=67108864 " +
+                    "--enable-features=VaapiVideoDecoder,PlatformHEVCDecoderSupport,HardwareMediaKeyHandling " +
+                    "--force-dark-mode";
 
                 CoreWebView2Environment env = await CoreWebView2Environment.CreateAsync(null, userDataFolder, options);
                 Log("CoreWebView2Environment created");
 
-                // 1. YouTube WebView
-                _ytWebView = new WebView2
-                {
-                    Dock = DockStyle.Fill,
-                    Visible = true
-                };
-                _contentPanel.Controls.Add(_ytWebView);
                 await _ytWebView.EnsureCoreWebView2Async(env);
-                await AdShieldEngine.AttachAdShieldAsync(_ytWebView);
-                _ytWebView.CoreWebView2.Navigate("https://www.youtube.com");
-                Log("YouTube WebView initialized");
 
-                // 2. YouTube Music WebView
-                _musicWebView = new WebView2
+                _ytWebView.CoreWebView2.Settings.IsStatusBarEnabled = false;
+                _ytWebView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+
+                // Sync window title with current YouTube video/page title
+                _ytWebView.CoreWebView2.DocumentTitleChanged += (s, e) =>
                 {
-                    Dock = DockStyle.Fill,
-                    Visible = false
+                    string title = _ytWebView.CoreWebView2.DocumentTitle;
+                    if (!string.IsNullOrWhiteSpace(title))
+                    {
+                        this.Text = title.EndsWith("YouTube") ? title + " - BlackTube" : title;
+                    }
+                    else
+                    {
+                        this.Text = "BlackTube - YouTube";
+                    }
                 };
-                _contentPanel.Controls.Add(_musicWebView);
-                await _musicWebView.EnsureCoreWebView2Async(env);
-                await AdShieldEngine.AttachAdShieldAsync(_musicWebView);
-                _musicWebView.CoreWebView2.Navigate("https://music.youtube.com");
-                Log("YouTube Music WebView initialized");
+
+                // History navigation sync
+                _ytWebView.CoreWebView2.HistoryChanged += (s, e) =>
+                {
+                    _btnBack.Enabled = _ytWebView.CoreWebView2.CanGoBack;
+                    _btnForward.Enabled = _ytWebView.CoreWebView2.CanGoForward;
+                };
+
+                // Full Screen Optimization: Hook HTML5 / YouTube video player fullscreen state change
+                _ytWebView.CoreWebView2.ContainsFullScreenElementChanged += (s, e) =>
+                {
+                    bool isElemFullScreen = _ytWebView.CoreWebView2.ContainsFullScreenElement;
+                    Log("ContainsFullScreenElementChanged: " + isElemFullScreen);
+                    SetFullScreenMode(isElemFullScreen);
+                };
+
+                // Attach Multi-Tier AdShield & SponsorBlock Engine
+                await AdShieldEngine.AttachAdShieldAsync(_ytWebView);
+
+                _ytWebView.CoreWebView2.Navigate("https://www.youtube.com");
+                Log("YouTube WebView successfully initialized");
+
+                _ytWebView.Focus();
             }
             catch (Exception ex)
             {
                 Log("FATAL WebView2 Init: " + ex.ToString());
-                MessageBox.Show("Failed to initialize browser engine: " + ex.Message, "BlackTube Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("Failed to initialize YouTube browser engine: " + ex.Message, "BlackTube Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+
+        // ── Navigation Methods ──
+        private void NavigateBack()
+        {
+            if (_ytWebView != null && _ytWebView.CoreWebView2 != null && _ytWebView.CoreWebView2.CanGoBack)
+            {
+                _ytWebView.CoreWebView2.GoBack();
+            }
+        }
+
+        private void NavigateForward()
+        {
+            if (_ytWebView != null && _ytWebView.CoreWebView2 != null && _ytWebView.CoreWebView2.CanGoForward)
+            {
+                _ytWebView.CoreWebView2.GoForward();
+            }
+        }
+
+        private void ReloadView()
+        {
+            if (_ytWebView != null && _ytWebView.CoreWebView2 != null)
+            {
+                _ytWebView.CoreWebView2.Reload();
+            }
+        }
+
+        private void NavigateHome()
+        {
+            if (_ytWebView != null && _ytWebView.CoreWebView2 != null)
+            {
+                _ytWebView.CoreWebView2.Navigate("https://www.youtube.com");
+            }
+        }
+
+        private void FocusYouTubeSearch()
+        {
+            if (_ytWebView != null && _ytWebView.CoreWebView2 != null)
+            {
+                string script = @"(function(){
+                    var searchInput = document.querySelector('input#search') || document.querySelector('input[name=""search_query""]');
+                    if (searchInput) {
+                        searchInput.focus();
+                        searchInput.select();
+                    }
+                })()";
+                _ytWebView.CoreWebView2.ExecuteScriptAsync(script);
+            }
+        }
+
+        // ── Full Screen Optimization ──
+        public void ToggleFullScreen()
+        {
+            SetFullScreenMode(!_isFullScreen);
+        }
+
+        public void SetFullScreenMode(bool fullscreen)
+        {
+            if (fullscreen == _isFullScreen) return;
+            _isFullScreen = fullscreen;
+
+            if (_isFullScreen)
+            {
+                // Save current geometry and state
+                _savedBorderStyle = this.FormBorderStyle;
+                _savedWindowState = this.WindowState;
+                _savedBounds = this.Bounds;
+
+                // Seamless borderless edge-to-edge fullscreen
+                _navBar.Visible = false;
+                this.FormBorderStyle = FormBorderStyle.None;
+                this.WindowState = FormWindowState.Normal;
+                this.Bounds = Screen.FromControl(this).Bounds;
+                _btnFullScreen.ForeColor = Color.FromArgb(0, 255, 170);
+            }
+            else
+            {
+                // Restore standard window styling and bounds
+                this.FormBorderStyle = _savedBorderStyle != FormBorderStyle.None ? _savedBorderStyle : FormBorderStyle.Sizable;
+                this.WindowState = _savedWindowState;
+                this.Bounds = _savedBounds;
+                _navBar.Visible = true;
+                _btnFullScreen.ForeColor = Color.FromArgb(200, 200, 225);
+            }
+        }
+
+        // ── Picture-in-Picture & Pin ──
+        public void TogglePipMode()
+        {
+            _isPipMode = !_isPipMode;
+            if (_isPipMode)
+            {
+                if (!_isFullScreen)
+                {
+                    _savedBounds = this.Bounds;
+                    _savedWindowState = this.WindowState;
+                }
+                this.WindowState = FormWindowState.Normal;
+                this.TopMost = true;
+                this.Size = new Size(520, 340);
+                this.Location = new Point(Screen.PrimaryScreen.WorkingArea.Right - 540, Screen.PrimaryScreen.WorkingArea.Bottom - 360);
+                _btnPip.ForeColor = Color.FromArgb(0, 255, 170);
+            }
+            else
+            {
+                this.TopMost = _isAlwaysOnTop;
+                this.Bounds = _savedBounds;
+                this.WindowState = _savedWindowState;
+                _btnPip.ForeColor = Color.FromArgb(200, 200, 225);
+            }
+        }
+
+        public void ToggleAlwaysOnTop()
+        {
+            _isAlwaysOnTop = !_isAlwaysOnTop;
+            this.TopMost = _isAlwaysOnTop;
+            _btnPin.ForeColor = _isAlwaysOnTop ? Color.FromArgb(0, 255, 170) : Color.FromArgb(200, 200, 225);
         }
 
         // ── Media Actions ──
         public async void ExecuteMediaAction(string action)
         {
-            WebView2 target = _isMusicActive ? _musicWebView : _ytWebView;
-            if (target == null || target.CoreWebView2 == null) return;
+            if (_ytWebView == null || _ytWebView.CoreWebView2 == null) return;
 
             string script = "";
             if (action == "toggle")
             {
-                script = "(function(){var v=document.querySelector('video');if(v){if(v.paused)v.play();else v.pause();}else{var btn=document.querySelector('#play-pause-button')||document.querySelector('.ytp-play-button');if(btn)btn.click();}})()";
+                script = "(function(){var v=document.querySelector('video');if(v){if(v.paused)v.play();else v.pause();}else{var btn=document.querySelector('.ytp-play-button');if(btn)btn.click();}})()";
             }
             else if (action == "next")
             {
-                script = "(function(){var b=document.querySelector('.next-button')||document.querySelector('.ytp-next-button')||document.querySelector('tp-yt-paper-icon-button[aria-label=\"Next track\"]');if(b)b.click();})()";
+                script = "(function(){var b=document.querySelector('.ytp-next-button');if(b)b.click();})()";
             }
             else if (action == "prev")
             {
-                script = "(function(){var b=document.querySelector('.previous-button')||document.querySelector('.ytp-prev-button')||document.querySelector('tp-yt-paper-icon-button[aria-label=\"Previous track\"]');if(b)b.click();})()";
+                script = "(function(){var b=document.querySelector('.ytp-prev-button');if(b)b.click();})()";
             }
 
             if (!string.IsNullOrEmpty(script))
             {
-                try { await target.CoreWebView2.ExecuteScriptAsync(script); }
+                try { await _ytWebView.CoreWebView2.ExecuteScriptAsync(script); }
                 catch { }
             }
         }
@@ -397,43 +575,50 @@ namespace BlackTube
         private void SetupTray()
         {
             _trayMenu = new ContextMenuStrip();
-            _trayMenu.BackColor = Color.FromArgb(18, 18, 28);
+            _trayMenu.BackColor = Color.FromArgb(18, 18, 24);
             _trayMenu.ForeColor = Color.White;
 
-            _trayMenu.Items.Add("🎬 YouTube", null, (s, e) => { ShowApp(); SwitchTab(false); });
-            _trayMenu.Items.Add("🎵 YT Music", null, (s, e) => { ShowApp(); SwitchTab(true); });
+            _trayMenu.Items.Add("▶ Open YouTube", null, (s, e) => ShowApp());
             _trayMenu.Items.Add(new ToolStripSeparator());
             _trayMenu.Items.Add("⏯ Play / Pause", null, (s, e) => ExecuteMediaAction("toggle"));
-            _trayMenu.Items.Add("⏭ Next Track", null, (s, e) => ExecuteMediaAction("next"));
-            _trayMenu.Items.Add("⏮ Previous Track", null, (s, e) => ExecuteMediaAction("prev"));
+            _trayMenu.Items.Add("⏭ Next Video", null, (s, e) => ExecuteMediaAction("next"));
+            _trayMenu.Items.Add("⏮ Previous Video", null, (s, e) => ExecuteMediaAction("prev"));
             _trayMenu.Items.Add(new ToolStripSeparator());
-            _trayMenu.Items.Add("⏱ Sleep Timer", null, (s, e) => ShowSleepTimerMenu());
+            _trayMenu.Items.Add("⛶ Toggle Fullscreen", null, (s, e) => ToggleFullScreen());
             _trayMenu.Items.Add("⧉ PiP Mode", null, (s, e) => TogglePipMode());
+            _trayMenu.Items.Add("⏱ Sleep Timer", null, (s, e) => ShowSleepTimerMenu());
             _trayMenu.Items.Add(new ToolStripSeparator());
             _trayMenu.Items.Add("✕ Exit BlackTube", null, (s, e) =>
             {
-                _isExiting = true;
-                _trayIcon.Visible = false;
+                if (_trayIcon != null) _trayIcon.Visible = false;
                 Application.Exit();
             });
 
             _trayIcon = new NotifyIcon
             {
                 Icon = this.Icon,
-                Text = "BlackTube (YouTube & YT Music)",
+                Text = "BlackTube - YouTube",
                 ContextMenuStrip = _trayMenu,
                 Visible = true
             };
             _trayIcon.DoubleClick += (s, e) => ShowApp();
         }
 
-        private void ShowApp()
+        public void ShowApp()
         {
+            if (this.InvokeRequired)
+            {
+                this.BeginInvoke((Action)ShowApp);
+                return;
+            }
             this.Show();
             if (this.WindowState == FormWindowState.Minimized)
                 this.WindowState = FormWindowState.Normal;
+            ShowWindow(this.Handle, SW_RESTORE);
             this.BringToFront();
             this.Activate();
+            this.Focus();
+            SetForegroundWindow(this.Handle);
         }
 
         // ── Sleep Timer & GC ──
@@ -454,14 +639,12 @@ namespace BlackTube
                     {
                         _sleepTimer.Stop();
                         _btnSleep.Text = "⏱";
-                        _btnSleep.ForeColor = Color.FromArgb(190, 190, 215);
+                        _btnSleep.ForeColor = Color.FromArgb(200, 200, 225);
                         ExecuteMediaAction("toggle");
                         if (_ytWebView != null && _ytWebView.CoreWebView2 != null)
                             _ytWebView.CoreWebView2.ExecuteScriptAsync("var v=document.querySelector('video');if(v)v.pause();");
-                        if (_musicWebView != null && _musicWebView.CoreWebView2 != null)
-                            _musicWebView.CoreWebView2.ExecuteScriptAsync("var v=document.querySelector('video');if(v)v.pause();");
                         if (_trayIcon != null)
-                            _trayIcon.ShowBalloonTip(2000, "BlackTube Sleep Timer", "Playback paused. Goodnight!", ToolTipIcon.Info);
+                            _trayIcon.ShowBalloonTip(2000, "BlackTube Sleep Timer", "YouTube playback paused. Goodnight!", ToolTipIcon.Info);
                     }
                 }
             };
@@ -474,7 +657,7 @@ namespace BlackTube
         private void ShowSleepTimerMenu()
         {
             var menu = new ContextMenuStrip();
-            menu.BackColor = Color.FromArgb(24, 24, 36);
+            menu.BackColor = Color.FromArgb(24, 24, 34);
             menu.ForeColor = Color.White;
 
             menu.Items.Add("Turn Off Timer", null, (s, e) =>
@@ -482,7 +665,7 @@ namespace BlackTube
                 _sleepTimer.Stop();
                 _sleepRemainingSeconds = 0;
                 _btnSleep.Text = "⏱";
-                _btnSleep.ForeColor = Color.FromArgb(190, 190, 215);
+                _btnSleep.ForeColor = Color.FromArgb(200, 200, 225);
             });
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("15 Minutes", null, (s, e) => StartSleep(15 * 60));
@@ -500,36 +683,6 @@ namespace BlackTube
             _sleepTimer.Start();
         }
 
-        // ── Picture-in-Picture & Pin ──
-        public void TogglePipMode()
-        {
-            _isPipMode = !_isPipMode;
-            if (_isPipMode)
-            {
-                _normalBounds = this.Bounds;
-                _normalState = this.WindowState;
-                this.WindowState = FormWindowState.Normal;
-                this.TopMost = true;
-                this.Size = new Size(500, 330);
-                this.Location = new Point(Screen.PrimaryScreen.WorkingArea.Right - 520, Screen.PrimaryScreen.WorkingArea.Bottom - 350);
-                _btnPip.ForeColor = Color.FromArgb(0, 255, 170);
-            }
-            else
-            {
-                this.TopMost = _isAlwaysOnTop;
-                this.Bounds = _normalBounds;
-                this.WindowState = _normalState;
-                _btnPip.ForeColor = Color.FromArgb(190, 190, 215);
-            }
-        }
-
-        public void ToggleAlwaysOnTop()
-        {
-            _isAlwaysOnTop = !_isAlwaysOnTop;
-            this.TopMost = _isAlwaysOnTop;
-            _btnPin.ForeColor = _isAlwaysOnTop ? Color.FromArgb(0, 255, 170) : Color.FromArgb(190, 190, 215);
-        }
-
         // ── Hotkeys ──
         private void SetupHotkeys()
         {
@@ -544,6 +697,11 @@ namespace BlackTube
 
         protected override void WndProc(ref Message m)
         {
+            if (m.Msg == WM_SHOWME)
+            {
+                ShowApp();
+                return;
+            }
             if (m.Msg == WM_HOTKEY)
             {
                 int id = m.WParam.ToInt32();
@@ -556,48 +714,97 @@ namespace BlackTube
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
-            if (keyData == (Keys.Control | Keys.D1))
+            // Fullscreen Toggle (F11)
+            if (keyData == Keys.F11)
             {
-                SwitchTab(false);
+                ToggleFullScreen();
                 return true;
             }
-            if (keyData == (Keys.Control | Keys.D2))
+
+            // Exit Fullscreen / PiP (Escape)
+            if (keyData == Keys.Escape)
             {
-                SwitchTab(true);
+                if (_isFullScreen)
+                {
+                    SetFullScreenMode(false);
+                    return true;
+                }
+                if (_isPipMode)
+                {
+                    TogglePipMode();
+                    return true;
+                }
+            }
+
+            // Search shortcut (Ctrl+F)
+            if (keyData == (Keys.Control | Keys.F))
+            {
+                FocusYouTubeSearch();
                 return true;
             }
+
+            // Home shortcut (Ctrl+H)
+            if (keyData == (Keys.Control | Keys.H))
+            {
+                NavigateHome();
+                return true;
+            }
+
+            // History Navigation
+            if (keyData == (Keys.Alt | Keys.Left))
+            {
+                NavigateBack();
+                return true;
+            }
+            if (keyData == (Keys.Alt | Keys.Right))
+            {
+                NavigateForward();
+                return true;
+            }
+
+            // Picture-in-Picture
             if (keyData == (Keys.Control | Keys.Shift | Keys.P))
             {
                 TogglePipMode();
                 return true;
             }
+
+            // Always on Top
             if (keyData == (Keys.Control | Keys.Shift | Keys.T))
             {
                 ToggleAlwaysOnTop();
                 return true;
             }
+
+            // Sleep Timer
             if (keyData == (Keys.Control | Keys.Shift | Keys.S))
             {
                 ShowSleepTimerMenu();
                 return true;
             }
+
+            // Reload
             if (keyData == (Keys.Control | Keys.R) || keyData == Keys.F5)
             {
-                ReloadActiveView();
+                ReloadView();
                 return true;
             }
+
+            // Minimize to Tray
             if (keyData == (Keys.Control | Keys.M))
             {
                 this.WindowState = FormWindowState.Minimized;
                 return true;
             }
+
+            // Quit
             if (keyData == (Keys.Control | Keys.Q))
             {
-                _isExiting = true;
-                _trayIcon.Visible = false;
+                if (_trayIcon != null) _trayIcon.Visible = false;
                 Application.Exit();
                 return true;
             }
+
             return base.ProcessCmdKey(ref msg, keyData);
         }
     }
